@@ -186,11 +186,23 @@ export default {
       this.editField = true;
     },
     btnClickSubmit() {
+      let resultObj;
       if (this.isEmail) {
         const value = formatEmail(this.localField);
         this.localField = value;
       }
-      this.$emit('changefield', { [this.field]: this.localField });
+      if (this.index != undefined && this.extension) {
+        resultObj = { 
+          field: this.field,
+          index: this.index,
+          extension: this.extension,
+          change: this.localField,
+        };
+      } else {
+        resultObj = { [this.field]: this.localField };
+      }
+
+      this.$emit('changeField', resultObj);
       this.editField = false;
     },
   },
