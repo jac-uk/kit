@@ -43,20 +43,23 @@
       :class="{'govuk-input--error': hasError}"
       @change="fileSelected"
     >
+    <span
+      v-if="!haveFile || (isReplacing && file)"
+      class="govuk-hint"
+    >
+      Please ensure your file is in {{ formattedTypesWithOr }} format and is less than {{ sizeLimit }}MB
+    </span>
   </div>
 </template>
 
 <script>
 import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from '@firebase/storage';
+import { doc, getDoc } from 'firebase/firestore';
+import { firestore } from '@/firebase';
 import FormField from './FormField.vue';
 import FormFieldError from './FormFieldError.vue';
 
 export default {
-  compatConfig: {
-    COMPONENT_V_MODEL: false,
-    // or, for full vue 3 compat in this component:
-    //MODE: 3,
-  },
   components: {
     FormFieldError,
   },
@@ -71,10 +74,6 @@ export default {
       default: '',
       type: String,
     },
-    // value: {
-    //   default: '',
-    //   type: String,
-    // },
     name: {
       type: String,
       required: true,
@@ -82,28 +81,27 @@ export default {
     },
     messages: {
       type: Object,
-      default: () => {
-        return {
-          required: 'Please choose a file to upload',
-        };
-      },
+      default: () => ({
+        required: 'Please choose a file to upload',
+      }),
     },
     types: {
-      type: String,
+      type: [Array, String],
       required: false,
-      default: '.pdf,.docx,.doc,.odt,.txt,.fodt',
+      default: () => ['.pdf','.docx','.doc','.odt','.txt','.fodt'],
     },
     enableDelete: {
       type: Boolean,
       default: false,
     },
   },
-  emits: ['update:modelValue'],
   data() {
     return {
       file: '',
       isReplacing: false,
       isUploading: false,
+      sizeLimit: 2,
+      fileUploadEnabled: null, 
     };
   },
   computed: {
@@ -120,31 +118,41 @@ export default {
         }
       },
     },
+    formattedTypesWithOr() {
+      return this.$props.types.length ? `${this.$props.types.join(', ')  } or ${  this.$props.types[this.$props.types.length - 1]}` : this.$props.types;
+    },
     fileExtensions() {
-      return this.$props.types;
+      return this.$props.types.length ? this.$props.types.join(',') : this.$props.types;
     },
   },
-  async mounted () {
-    if (typeof this.fileName === 'string' && this.fileName.length) {
-      const isUploaded = await this.verifyFile(this.fileName);
-
-      if (!isUploaded) {
-        this.fileName = '';
-        this.resetFile();
-      }
-    }
+  async created() {
+    await this.fetchFileUploadStatus(); // Fetch the file upload status on component creation
   },
   methods: {
+    async fetchFileUploadStatus() {
+      try {
+        const settingsRef = doc(firestore, 'settings/candidateSettings');
+        const docSnapshot = await getDoc(settingsRef);
+        this.fileUploadEnabled = docSnapshot.exists() ? docSnapshot.data().fileUpload.enabled : false;
+      } catch (error) {
+        console.error('Failed to fetch file upload status:', error);
+        this.fileUploadEnabled = false; // Default to false if there's an error
+      }
+    },
     replaceFile() {
       this.isReplacing = true;
     },
-    fileSelected() {
+    async fileSelected() {
+      if (!this.fileUploadEnabled) {
+        this.setError('File upload is currently disabled. Please try again later.');
+        return;
+      }
+
       const file = this.$refs.file.files[0];
       this.setError('');
       return this.upload(file);
     },
     generateFileName(originalName) {
-      // Ensure the filename is unique (this is beneficial for reactivity in other components)
       const parts = originalName.split('.');
       if ( parts.length === 1 || ( parts[0] === '' && parts.length === 2 )) {
         return this.getNumericalFileName(this.name);
@@ -159,8 +167,7 @@ export default {
       const fileExtension = parts.pop();
 
       if (this.$props.types) {
-        const providedTypes = this.$props.types.split(',');
-        if (providedTypes.includes(`.${fileExtension}`)) {
+        if (this.$props.types.includes(`.${fileExtension}`)) {
           return true;
         }
       }
@@ -171,19 +178,18 @@ export default {
     },
     fileIsTooBig(size){
       const megabyteSize = size / 1024 / 1024; // in MB
-      return megabyteSize > 2;
+      return megabyteSize > this.sizeLimit;
     },
     resetFile() {
       this.isUploading = false;
     },
     async upload(file) {
-      // @todo return more useful error messages
       if (!file) {
         this.setError('File upload failed, please try again [1]');
         return false;
       }
       if (!this.validFileExtension(file.name)) {
-        this.setError(`Invalid file type. Choose from: ${this.types.split(',').map(type => type.replace(/\./g, '').trim()).join(',')}`);
+        this.setError(`Invalid file type. Please ensure the file is in ${this.formattedTypesWithOr} format`);
         return false;
       }
       if (this.fileIsEmpty(file.size)){
@@ -191,20 +197,16 @@ export default {
         return false;
       }
       if (this.fileIsTooBig(file.size)){
-        this.setError('File is too large. Limit: 2MB');
+        this.setError(`File is too large. Limit: ${this.sizeLimit}MB`);
         return false;
       }
 
       this.isUploading = true;
       const fileName = this.generateFileName(file.name);
 
-      /**
-       * @see https://firebase.google.com/docs/storage/web/upload-files#upload_from_a_blob_or_file
-       */
       const storage = getStorage();
       const uploadRef = ref(storage ,`${this.path}/${fileName}`);
 
-      // Delete the current file in file storage
       if (this.haveFile && this.enableDelete) {
         this.deleteFile(this.path, this.modelValue);
       }
@@ -217,7 +219,6 @@ export default {
         return true;
       } catch (e) {
         this.setError('File upload failed, please try again [3]');
-
         return false;
       } finally {
         this.resetFile();
@@ -231,7 +232,6 @@ export default {
       const storage = getStorage();
       const fileRef = ref(storage, `${this.path}/${fileName}`);
 
-      // Check if file exists in storage
       try {
         const downloadUrl = await getDownloadURL(fileRef);
 
@@ -249,19 +249,13 @@ export default {
       return `${name} - ${dateToNumber}`;
     },
     deleteFile(path, filename) {
-      /**
-       * @see https://firebase.google.com/docs/storage/web/delete-files
-       */
       const storage = getStorage();
       const deleteRef = ref(storage, `${path}/${filename}`);
       try {
         deleteObject(deleteRef);
       }
       catch (error) {
-        // Uh-oh, an error occurred!
-        // eslint-disable-next-line no-console
-        console.log('error deleting a file:', error);
-
+        console.error('Error deleting file:', error);
       }
     },
   },
